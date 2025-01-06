@@ -1,0 +1,23 @@
+re ::= <are> <re'>
+
+re' ::= '|' <are> <re'>
+		| ε
+
+are ::= ^ <cat>
+	| <cat> $
+	| <cat>
+
+cat ::= <quantified_expr> <cat'>
+
+cat' ::= <quantified_expr> <cat'>
+	  	| ε
+		
+quantified_expr ::= <expr> +
+				| <expr> *
+				| <expr> ?
+
+expr ::= literal
+	 	| class
+		| dot
+		| ( <re> )
+
