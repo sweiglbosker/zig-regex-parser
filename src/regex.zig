@@ -5,8 +5,10 @@ pub const Parser = @import("parser.zig");
 
 const Self = @This();
 
-const minInt = minInt;
-const maxInt = maxInt;
+const minInt = std.math.minInt;
+const maxInt = std.math.maxInt;
+
+const Error = error{InvalidClass};
 
 pub const Token = struct {
     pub const Lexeme = union(enum) {
@@ -25,6 +27,7 @@ pub const Token = struct {
 
     lexeme: Lexeme,
     position: struct { usize, usize },
+    lexer: *Lexer,
 
     pub fn isQuantifier(self: *const Token) bool {
         return switch (self.lexeme) {
@@ -56,12 +59,11 @@ pub const Token = struct {
                 try writer.print(", value: {c}", .{l});
             },
             .Class => |cc| {
-                try writer.print(", value: {}", .{cc});
+                try writer.print(", value: {}: ", .{cc});
             },
             else => {},
         }
-
-        try writer.print(", pos: {d}-{d}\n", .{ self.position[0], self.position[1] });
+        try writer.print(", pos: {d}", .{self.position[0]});
     }
 };
 
@@ -72,7 +74,7 @@ pub const Class = struct {
     };
 
     pub fn format(self: *const Class, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        if (fmt.len >= 0) {
+        if (fmt.len != 0) {
             return std.fmt.invalidFmtError(fmt, self);
         }
 
@@ -86,7 +88,7 @@ pub const Class = struct {
             }
         }
 
-        _ = try writer.write("[]");
+        _ = try writer.write("]");
     }
 
     fn rangeLessThan(_: void, lhs: Range, rhs: Range) bool {
@@ -94,20 +96,20 @@ pub const Class = struct {
     }
 
     ranges: []const Range,
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
 
     const RangeList = std.ArrayList(Range);
 
     // (slice does not include braces)
     // TODO: escape sequences (im lazy)
-    pub fn init(allocator: *std.mem.Allocator, str: []const u8) !Class {
+    pub fn init(allocator: std.mem.Allocator, str: []const u8) !Class {
         var negated = false;
         var rangelist = RangeList.init(allocator);
         defer rangelist.deinit();
 
         std.debug.assert(str.len >= 1);
 
-        var i = 0;
+        var i: usize = 0;
         if (str[i] == '^') {
             negated = true;
             i += 1;
@@ -131,7 +133,10 @@ pub const Class = struct {
                 const min = str[i];
                 const max = str[i + 2];
 
-                std.debug.assert(min < max);
+                if (min > max) {
+                    std.debug.print("Invalid character range: {x}-{x}\n", .{ min, max });
+                    return Error.InvalidClass;
+                }
 
                 if (negated == false) {
                     try rangelist.append(.{ min, max });
@@ -158,26 +163,26 @@ pub const Class = struct {
         defer stack.deinit();
 
         std.debug.assert(ranges.len >= 1);
-        stack.append(ranges[0]);
+        try stack.append(ranges[0]);
 
         for (1..ranges.len) |j| {
             if (ranges[j][0] < stack.getLast()[1]) { // they overlap: merge
                 var tmp = stack.pop();
 
                 tmp[1] = @max(tmp[1], ranges[j][1]);
-                stack.push(tmp);
+                try stack.append(tmp);
             } else { // they don't: new range
-                stack.push(ranges[j]);
+                try stack.append(ranges[j]);
             }
         }
 
         return .{
-            .ranges = stack.toOwnedSlice(),
+            .ranges = try stack.toOwnedSlice(),
             .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *Class) void {
+    pub fn deinit(self: Class) void {
         self.allocator.free(self.ranges);
     }
 };

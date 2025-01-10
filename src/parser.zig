@@ -28,30 +28,64 @@ const Rule = union(enum) {
 
 i: TokenIndex = 0,
 tokens: []const Token,
+allocator: std.mem.Allocator,
 
 pub const ParseTree = struct {
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     root: *Node,
+
+    pub fn format(self: *const ParseTree, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        if (fmt.len != 0) {
+            return std.fmt.invalidFmtError;
+        }
+
+        try writer.print("{}\n", .{self.root});
+    }
 
     pub const Node = struct {
         rule: Rule,
         child: ?*Node = null,
         sibling: ?*Node = null,
 
-        pub fn init(allocator: *std.mem.Allocator, rule: Rule) !*Node {
+        pub fn format(self: *const Node, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            if (fmt.len != 0) {
+                return std.fmt.invalidFmtError;
+            }
+
+            try writer.print("rule: {s}", .{@tagName(self.rule)});
+
+            switch (self.rule) {
+                .Terminal => |*token| {
+                    try writer.print("token: {}\n", .{token});
+                },
+                else => {
+                    try writer.print("\n", .{});
+                },
+            }
+
+            if (self.sibling) |bro| {
+                try writer.print("{}", .{bro});
+            }
+
+            if (self.child) |son| {
+                try writer.print("{}", .{son});
+            }
+        }
+
+        pub fn init(allocator: std.mem.Allocator, rule: Rule) !*Node {
             const node = try allocator.create(Node);
             node.* = .{ .rule = rule };
 
             return node;
         }
 
-        pub fn deinit(self: *Node, allocator: *std.mem.Allocator) void {
+        pub fn deinit(self: *Node, allocator: std.mem.Allocator) void {
             if (self.child) |child| {
-                child.deinit();
+                child.deinit(allocator);
             }
 
             if (self.sibling) |sibling| {
-                sibling.deinit();
+                sibling.deinit(allocator);
             }
 
             allocator.destroy(self);
@@ -66,22 +100,27 @@ pub const ParseTree = struct {
             var itr = self.child;
 
             while (itr) |node| {
-                if (node.next) |sibling| {
-                    itr = sibling;
+                if (node.sibling) |bro| {
+                    itr = bro;
                 } else {
                     break;
                 }
             }
 
-            itr.next = child;
+            itr.?.sibling = child;
             return;
         }
     };
+
+    pub fn deinit(self: *ParseTree) void {
+        self.root.deinit(self.allocator);
+    }
 };
 
-pub fn init(tokens: []const Token) Self {
+pub fn init(allocator: std.mem.Allocator, tokens: []const Token) Self {
     return .{
         .tokens = tokens,
+        .allocator = allocator,
     };
 }
 
@@ -94,7 +133,7 @@ fn peek(self: *Self) ?Token {
 }
 
 inline fn epsilon(self: *Self) bool {
-    return (self.Peek() == null);
+    return (self.peek() == null);
 }
 
 fn next(self: *Self) ?Token {
@@ -105,15 +144,12 @@ fn next(self: *Self) ?Token {
     return r;
 }
 
-pub fn parse(self: *Self, allocator: *std.mem.Allocator) !ParseTree {
-    return .{
-        .allocator = allocator,
-        .root = try self.parseRegex(),
-    };
+pub fn parse(self: *Self) !ParseTree {
+    return .{ .root = try self.parseRegex(), .allocator = self.allocator };
 }
 
 // TODO: optional or anytype?
-fn parseTerminal(self: *Self, expected: ?Token.Lexeme) !*ParseTree.Node {
+fn parseTerminal(self: *Self, expected: ?@TypeOf(.Lexeme)) !*ParseTree.Node {
     const terminal = self.next() orelse {
         if (expected) |lexeme| {
             std.log.err("Parser error: expected token of type {s}.", .{@tagName(lexeme)});
@@ -126,7 +162,7 @@ fn parseTerminal(self: *Self, expected: ?Token.Lexeme) !*ParseTree.Node {
 
     if (expected) |lexeme| {
         if (activeTag(terminal.lexeme) != lexeme) { // is this necessary?
-            std.log.err("Parser error: expected token of {s} but found token {s}.\n", .{ @tagName(lexeme), @tagName(terminal) });
+            std.debug.print("Parser error: expected token of {s} but found token {s}.\n", .{ @tagName(lexeme), @tagName(terminal.lexeme) });
             return Error.UnexpectedToken;
         }
     }
@@ -134,9 +170,9 @@ fn parseTerminal(self: *Self, expected: ?Token.Lexeme) !*ParseTree.Node {
     return try ParseTree.Node.init(self.allocator, .{ .Terminal = terminal });
 }
 
-fn parseRegex(self: *Self) !*ParseTree.Node {
+fn parseRegex(self: *Self) error{ OutOfMemory, UnexpectedToken, ExpectedToken }!*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.Regex);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
     pt.appendChild(try self.parseAnchored());
     pt.appendChild(try self.parseRegexR());
@@ -146,10 +182,11 @@ fn parseRegex(self: *Self) !*ParseTree.Node {
 
 fn parseRegexR(self: *Self) !?*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.Regex);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
     // re -> ε
     if (self.epsilon()) {
+        pt.deinit(self.allocator);
         return null;
     }
 
@@ -164,16 +201,20 @@ fn parseRegexR(self: *Self) !?*ParseTree.Node {
 
 fn parseAnchored(self: *Self) !*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.Anchored);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
-    if (self.peek() == Token.Lexeme.StartAnchor) {
-        pt.appendChild(try self.parseTerminal(.StartAnchor));
+    if (self.peek()) |token| {
+        if (token.lexeme == .StartAnchor) {
+            pt.appendChild(try self.parseTerminal(.StartAnchor));
+        }
     }
 
     pt.appendChild(try self.parseConcatenated());
 
-    if (self.peek() == Token.Lexeme.EndAnchor) {
-        pt.appendChild(try self.parseTerminal(.EndAnchor));
+    if (self.peek()) |token| {
+        if (token.lexeme == .EndAnchor) {
+            pt.appendChild(try self.parseTerminal(.EndAnchor));
+        }
     }
 
     return pt;
@@ -181,7 +222,7 @@ fn parseAnchored(self: *Self) !*ParseTree.Node {
 
 fn parseConcatenated(self: *Self) !*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.Concatenated);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
     pt.appendChild(try self.parseQuantified());
 
@@ -192,9 +233,10 @@ fn parseConcatenated(self: *Self) !*ParseTree.Node {
 
 fn parseConcatenatedR(self: *Self) !?*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.ConcatenatedR);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
     if (self.epsilon()) {
+        pt.deinit(self.allocator);
         return null;
     }
 
@@ -207,7 +249,7 @@ fn parseConcatenatedR(self: *Self) !?*ParseTree.Node {
 
 fn parseQuantified(self: *Self) !*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.Quantified);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
     pt.appendChild(try self.parseExpr());
 
@@ -222,7 +264,7 @@ fn parseQuantified(self: *Self) !*ParseTree.Node {
 
 fn parseExpr(self: *Self) !*ParseTree.Node {
     var pt = try ParseTree.Node.init(self.allocator, Rule.Quantified);
-    errdefer pt.deinit();
+    errdefer pt.deinit(self.allocator);
 
     if (self.peek().?.lexeme == .LParen) {
         pt.appendChild(try self.parseTerminal(.LParen));

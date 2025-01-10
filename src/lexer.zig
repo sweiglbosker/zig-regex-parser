@@ -13,9 +13,9 @@ regexp: []const u8,
 tokens: ?[]const Token = null,
 start: usize = 0,
 cursor: usize = 0,
-allocator: *std.mem.Allocator,
+allocator: std.mem.Allocator,
 
-pub fn init(allocator: *std.mem.Allocator, regexp: []const u8) !Self {
+pub fn init(allocator: std.mem.Allocator, regexp: []const u8) !Self {
     return .{
         .regexp = regexp,
         .allocator = allocator,
@@ -27,7 +27,7 @@ pub fn deinit(self: *Self) void {
         for (tl) |token| {
             token.deinit();
         }
-        self.allocator.free(self.tokens);
+        self.allocator.free(tl);
     }
 }
 
@@ -42,10 +42,10 @@ fn readChar(self: *Self) !u8 {
 /// like `advance` but returns `null` instead of `Error.EndOfBuffer`.
 pub fn next(self: *Self) !?Token {
     return self.advance() catch |err| {
-        switch (err) {
-            Error.EndOfBuffer => null,
-            else => err,
-        }
+        if (err == Error.EndOfBuffer)
+            return null;
+
+        return err;
     };
 }
 
@@ -61,6 +61,7 @@ pub fn advance(self: *Self) !Token {
     var c = try self.readChar();
 
     const t = Token{
+        .lexer = self,
         .lexeme = switch (c) {
             '.' => .Dot,
             '*' => .Star,
@@ -71,22 +72,7 @@ pub fn advance(self: *Self) !Token {
             ')' => .RParen,
             '^' => .StartAnchor,
             '$' => .EndAnchor,
-            '[' => class: {
-                while (c != ')') {
-                    // doing this here for verbosity
-                    self.cursor += 1;
-                    c = self.readChar() catch |err| {
-                        if (err == Error.EndOfBuffer) {
-                            std.log.err("{d}: expected ']' to close character class.\n", .{self.start});
-                            return Error.ExpectedCharacter;
-                        } else {
-                            return err;
-                        }
-                    };
-
-                    break :class .{ .Class = Regex.Class.init(self.allocator, self.regexp[self.start + 1 .. self.cursor]) };
-                }
-            },
+            '[' => .{ .Class = try self.parseClass() },
             else => literal: {
                 // TODO: should expand with escape sequences later?
                 if (c == '\\') {
@@ -103,6 +89,23 @@ pub fn advance(self: *Self) !Token {
     return t;
 }
 
+fn parseClass(self: *Self) !Regex.Class {
+    var c = try self.readChar();
+
+    while (c != ']') {
+        self.cursor += 1;
+        c = self.readChar() catch |err| {
+            if (err == Error.EndOfBuffer) {
+                std.debug.print("{d}: expected ']' to close character class.\n", .{self.start});
+                return Error.ExpectedCharacter;
+            } else {
+                return err;
+            }
+        };
+    }
+    return try Regex.Class.init(self.allocator, self.regexp[self.start + 1 .. self.cursor]);
+}
+
 pub fn scan(self: *Self) ![]const Token {
     var tokens = TokenList.init(self.allocator);
 
@@ -110,10 +113,10 @@ pub fn scan(self: *Self) ![]const Token {
 
     var t = try self.next();
 
-    while (t) : (t = try self.next()) {
-        try tokens.append(t);
+    while (t) |token| : (t = try self.next()) {
+        try tokens.append(token);
     }
 
     self.tokens = try tokens.toOwnedSlice();
-    return self.tokens;
+    return self.tokens.?;
 }
